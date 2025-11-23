@@ -305,8 +305,8 @@ private:
         }
         Paint_DrawString_EN(5, 140, display_topic2.c_str(), &Font12, BLACK, MAGENTA);
         
-        // Display the buffer using fast single-transfer method
-        LCD_1IN69_Display_Fast(image_buffer_);
+        // Display the buffer - use standard method for now
+        LCD_1IN69_Display(image_buffer_);
     }
     
     rclcpp::Subscription<sensor_msgs::msg::Image>::SharedPtr subscription_raw_;
