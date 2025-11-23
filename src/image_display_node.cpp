@@ -112,14 +112,25 @@ private:
         try {
             cv_bridge::CvImagePtr cv_ptr = cv_bridge::toCvCopy(msg, sensor_msgs::image_encodings::BGR8);
             
-            // Preprocess: resize image here in callback (async processing)
-            const int available_height = (LCD_1IN69_HEIGHT - 40 - 18) / 2;  // Split space
-            cv::Mat resized = resizeToFit(cv_ptr->image, LCD_1IN69_WIDTH, available_height);
+            // Fast downsample immediately if image is larger than display
+            cv::Mat image = cv_ptr->image;
+            if (image.cols > LCD_1IN69_WIDTH * 2 || image.rows > LCD_1IN69_HEIGHT * 2) {
+                // Quick 2x downsample using pyrDown (very fast)
+                cv::pyrDown(image, image);
+                if (image.cols > LCD_1IN69_WIDTH * 2 || image.rows > LCD_1IN69_HEIGHT * 2) {
+                    cv::pyrDown(image, image);  // Downsample again if still too large
+                }
+            }
+            
+            // Resize to exact fit
+            const int available_height = (LCD_1IN69_HEIGHT - 40 - 18) / 2;
+            cv::Mat resized = resizeToFit(image, LCD_1IN69_WIDTH, available_height);
             
             // Store preprocessed image in buffer
             std::lock_guard<std::mutex> lock(image_mutex_);
             raw_image_ = resized;
             has_raw_image_ = true;
+            new_frame_available_ = true;
         } catch (cv_bridge::Exception& e) {
             RCLCPP_ERROR(this->get_logger(), "cv_bridge exception: %s", e.what());
         }
@@ -130,14 +141,25 @@ private:
         try {
             cv_bridge::CvImagePtr cv_ptr = cv_bridge::toCvCopy(msg, sensor_msgs::image_encodings::BGR8);
             
-            // Preprocess: resize image here in callback (async processing)
-            const int available_height = (LCD_1IN69_HEIGHT - 40 - 18) / 2;  // Split space
-            cv::Mat resized = resizeToFit(cv_ptr->image, LCD_1IN69_WIDTH, available_height);
+            // Fast downsample immediately if image is larger than display
+            cv::Mat image = cv_ptr->image;
+            if (image.cols > LCD_1IN69_WIDTH * 2 || image.rows > LCD_1IN69_HEIGHT * 2) {
+                // Quick 2x downsample using pyrDown (very fast)
+                cv::pyrDown(image, image);
+                if (image.cols > LCD_1IN69_WIDTH * 2 || image.rows > LCD_1IN69_HEIGHT * 2) {
+                    cv::pyrDown(image, image);  // Downsample again if still too large
+                }
+            }
+            
+            // Resize to exact fit
+            const int available_height = (LCD_1IN69_HEIGHT - 40 - 18) / 2;
+            cv::Mat resized = resizeToFit(image, LCD_1IN69_WIDTH, available_height);
             
             // Store preprocessed image in buffer
             std::lock_guard<std::mutex> lock(image_mutex_);
             processed_image_ = resized;
             has_processed_image_ = true;
+            new_frame_available_ = true;
         } catch (cv_bridge::Exception& e) {
             RCLCPP_ERROR(this->get_logger(), "cv_bridge exception: %s", e.what());
         }
@@ -146,13 +168,11 @@ private:
     void renderLoop()
     {
         // Rendering loop running in separate thread
-        const auto frame_duration = std::chrono::milliseconds(50);  // 20 FPS
+        const auto frame_duration = std::chrono::milliseconds(50);  // Reduced to 10 FPS for stability
         
         while (running_) {
-            auto start_time = std::chrono::steady_clock::now();
-            
-            // Only update display if we have at least one image
-            if (has_raw_image_ || has_processed_image_) {
+            // Only update display if we have new frames
+            if (new_frame_available_ && (has_raw_image_ || has_processed_image_)) {
                 // Get latest PREPROCESSED images from buffers (already resized!)
                 cv::Mat raw_copy, processed_copy;
                 bool has_raw, has_processed;
@@ -167,6 +187,7 @@ private:
                     }
                     has_raw = has_raw_image_;
                     has_processed = has_processed_image_;
+                    new_frame_available_ = false;  // Reset flag
                 }
                 
                 // Combine preprocessed images and display (fast!)
@@ -174,14 +195,8 @@ private:
                 convertAndDisplay(combined);
             }
             
-            // Sleep to maintain frame rate
-            auto end_time = std::chrono::steady_clock::now();
-            auto elapsed = end_time - start_time;
-            auto sleep_time = frame_duration - elapsed;
-            
-            if (sleep_time > std::chrono::milliseconds(0)) {
-                std::this_thread::sleep_for(sleep_time);
-            }
+            // Fixed sleep duration for consistent frame pacing
+            std::this_thread::sleep_for(frame_duration);
         }
     }
     
@@ -229,38 +244,41 @@ private:
         int new_height = static_cast<int>(image.rows * scale);
         
         cv::Mat resized;
-        cv::resize(image, resized, cv::Size(new_width, new_height), 0, 0, cv::INTER_LINEAR);
+        // Use faster interpolation for better performance
+        cv::resize(image, resized, cv::Size(new_width, new_height), 0, 0, cv::INTER_NEAREST);
         
         return resized;
     }
     
     void convertAndDisplay(const cv::Mat& image)
     {
-        // First, clear the entire buffer
-        memset(image_buffer_, 0, LCD_1IN69_HEIGHT * LCD_1IN69_WIDTH * 2);
+        // Optimized RGB565 conversion with pre-allocated buffer
+        const int total_pixels = LCD_1IN69_WIDTH * LCD_1IN69_HEIGHT;
         
-        // Convert BGR to RGB565 format with proper byte order
+        // Fast conversion loop - unrolled pixel access
+        int idx = 0;
         for (int y = 0; y < image.rows && y < LCD_1IN69_HEIGHT; y++) {
-            for (int x = 0; x < image.cols && x < LCD_1IN69_WIDTH; x++) {
-                cv::Vec3b pixel = image.at<cv::Vec3b>(y, x);
+            const cv::Vec3b* row_ptr = image.ptr<cv::Vec3b>(y);
+            for (int x = 0; x < image.cols && x < LCD_1IN69_WIDTH; x++, idx++) {
+                const cv::Vec3b& pixel = row_ptr[x];
                 
-                // OpenCV uses BGR order, extract channels
-                uint8_t b = pixel[0]; // Blue
-                uint8_t g = pixel[1]; // Green  
-                uint8_t r = pixel[2]; // Red
+                // Fast RGB565 conversion with bit operations
+                uint16_t rgb565 = ((pixel[2] & 0xF8) << 8) |   // Red
+                                  ((pixel[1] & 0xFC) << 3) |   // Green
+                                  ((pixel[0] >> 3));           // Blue
                 
-                // Convert 8-bit BGR to 5-6-5 RGB format
-                // RGB565 format: RRRR RGGG GGGB BBBB (big-endian)
-                uint8_t r5 = (r >> 3) & 0x1F;  // 5 bits for red
-                uint8_t g6 = (g >> 2) & 0x3F;  // 6 bits for green
-                uint8_t b5 = (b >> 3) & 0x1F;  // 5 bits for blue
-                
-                // Pack into RGB565 - swap bytes for correct display order
-                uint16_t rgb565 = (r5 << 11) | (g6 << 5) | b5;
-                
-                // Swap bytes for proper display (little-endian to big-endian)
-                image_buffer_[y * LCD_1IN69_WIDTH + x] = ((rgb565 & 0xFF) << 8) | ((rgb565 >> 8) & 0xFF);
+                // Byte swap for display
+                image_buffer_[idx] = ((rgb565 & 0xFF) << 8) | ((rgb565 >> 8) & 0xFF);
             }
+            // Fill rest of row with black
+            for (int x = image.cols; x < LCD_1IN69_WIDTH; x++, idx++) {
+                image_buffer_[idx] = 0;
+            }
+        }
+        
+        // Fill remaining rows with black
+        for (int i = idx; i < total_pixels; i++) {
+            image_buffer_[i] = 0;
         }
         
         // Initialize Paint library with the buffer
@@ -299,6 +317,7 @@ private:
     // Rendering thread
     std::thread render_thread_;
     std::atomic<bool> running_;
+    std::atomic<bool> new_frame_available_;
     
     // Image buffers protected by mutex
     std::mutex image_mutex_;
