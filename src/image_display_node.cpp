@@ -1,0 +1,184 @@
+#include <memory>
+#include <rclcpp/rclcpp.hpp>
+#include <sensor_msgs/msg/image.hpp>
+#include <cv_bridge/cv_bridge.h>
+#include <opencv2/opencv.hpp>
+
+extern "C" {
+    #include "waveshare/DEV_Config.h"
+    #include "waveshare/LCD_1in69.h"
+    #include "waveshare/GUI_Paint.h"
+    #include "waveshare/fonts.h"
+}
+
+class ImageDisplayNode : public rclcpp::Node
+{
+public:
+    ImageDisplayNode() : Node("image_display_node")
+    {
+        RCLCPP_INFO(this->get_logger(), "Initializing ST7789V2 image display...");
+        
+        // Initialize hardware
+        if(DEV_ModuleInit() != 0){
+            RCLCPP_ERROR(this->get_logger(), "Failed to initialize hardware!");
+            RCLCPP_ERROR(this->get_logger(), "Make sure you are running as root (sudo) and SPI is enabled");
+            rclcpp::shutdown();
+            return;
+        }
+        
+        // Initialize LCD
+        LCD_1IN69_Init(VERTICAL);
+        LCD_1IN69_Clear(BLACK);
+        LCD_SetBacklight(1023);
+        
+        // Allocate image buffer
+        UDOUBLE Imagesize = LCD_1IN69_HEIGHT * LCD_1IN69_WIDTH * 2;
+        image_buffer_ = (UWORD *)malloc(Imagesize);
+        if(image_buffer_ == NULL) {
+            RCLCPP_ERROR(this->get_logger(), "Failed to allocate image buffer!");
+            DEV_ModuleExit();
+            rclcpp::shutdown();
+            return;
+        }
+        
+        // Initialize Paint library
+        Paint_NewImage(image_buffer_, LCD_1IN69_WIDTH, LCD_1IN69_HEIGHT, 0, BLACK, 16);
+        Paint_Clear(BLACK);
+        
+        // Show startup message
+        Paint_DrawString_EN(10, 130, "Camera Display", &Font24, BLACK, WHITE);
+        Paint_DrawString_EN(10, 160, "Waiting...", &Font16, BLACK, CYAN);
+        LCD_1IN69_Display(image_buffer_);
+        
+        RCLCPP_INFO(this->get_logger(), "Display initialized successfully");
+        
+        // Create subscription
+        subscription_ = this->create_subscription<sensor_msgs::msg::Image>(
+            "/camera/image_raw", 
+            10,
+            std::bind(&ImageDisplayNode::image_callback, this, std::placeholders::_1));
+        
+        RCLCPP_INFO(this->get_logger(), "Subscribed to /camera/image_raw topic");
+    }
+    
+    ~ImageDisplayNode()
+    {
+        RCLCPP_INFO(this->get_logger(), "Shutting down image display node...");
+        
+        if (image_buffer_) {
+            Paint_Clear(BLACK);
+            Paint_DrawString_EN(40, 130, "Shutting down...", &Font20, BLACK, RED);
+            LCD_1IN69_Display(image_buffer_);
+            DEV_Delay_ms(1000);
+            
+            free(image_buffer_);
+            image_buffer_ = nullptr;
+        }
+        
+        DEV_ModuleExit();
+    }
+
+private:
+    void image_callback(const sensor_msgs::msg::Image::SharedPtr msg)
+    {
+        try {
+            // Convert ROS image to OpenCV format
+            cv_bridge::CvImagePtr cv_ptr = cv_bridge::toCvCopy(msg, sensor_msgs::image_encodings::BGR8);
+            
+            // Calculate aspect ratio and resize to fit display while maintaining ratio
+            cv::Mat fitted = fitImageToDisplay(cv_ptr->image);
+            
+            // Convert to RGB565 and display
+            convertAndDisplay(fitted);
+            
+        } catch (cv_bridge::Exception& e) {
+            RCLCPP_ERROR(this->get_logger(), "cv_bridge exception: %s", e.what());
+        }
+    }
+    
+    cv::Mat fitImageToDisplay(const cv::Mat& image)
+    {
+        // Apply slight Gaussian blur to reduce noise before downsampling
+        cv::Mat blurred;
+        cv::GaussianBlur(image, blurred, cv::Size(3, 3), 0.5);
+        
+        // Calculate scaling factor to fit image in display while maintaining aspect ratio
+        float scale_width = static_cast<float>(LCD_1IN69_WIDTH) / blurred.cols;
+        float scale_height = static_cast<float>(LCD_1IN69_HEIGHT) / blurred.rows;
+        float scale = std::min(scale_width, scale_height);
+        
+        // Calculate new size maintaining aspect ratio
+        int new_width = static_cast<int>(blurred.cols * scale);
+        int new_height = static_cast<int>(blurred.rows * scale);
+        
+        // Resize image with high-quality interpolation
+        cv::Mat resized;
+        cv::resize(blurred, resized, cv::Size(new_width, new_height), 0, 0, cv::INTER_AREA);
+        
+        // Create black canvas of display size
+        cv::Mat canvas = cv::Mat::zeros(LCD_1IN69_HEIGHT, LCD_1IN69_WIDTH, blurred.type());
+        
+        // Calculate position to center the image
+        int x_offset = (LCD_1IN69_WIDTH - new_width) / 2;
+        int y_offset = (LCD_1IN69_HEIGHT - new_height) / 2;
+        
+        // Copy resized image to center of canvas
+        resized.copyTo(canvas(cv::Rect(x_offset, y_offset, new_width, new_height)));
+        
+        return canvas;
+    }
+    
+    void convertAndDisplay(const cv::Mat& image)
+    {
+        // Convert BGR to RGB565 format with dithering to reduce banding
+        for (int y = 0; y < LCD_1IN69_HEIGHT && y < image.rows; y++) {
+            for (int x = 0; x < LCD_1IN69_WIDTH && x < image.cols; x++) {
+                cv::Vec3b pixel = image.at<cv::Vec3b>(y, x);
+                
+                // Convert BGR to RGB
+                int r = pixel[2]; // Red (OpenCV is BGR)
+                int g = pixel[1]; // Green
+                int b = pixel[0]; // Blue
+                
+                // Add dithering noise to reduce banding artifacts
+                // Simple ordered dithering pattern
+                int dither = ((x & 1) ^ (y & 1)) * 2 - 1;
+                r = std::max(0, std::min(255, r + dither));
+                g = std::max(0, std::min(255, g + dither));
+                b = std::max(0, std::min(255, b + dither));
+                
+                // Convert 8-bit RGB to 5-6-5 format with rounding
+                uint16_t r5 = ((r * 31 + 127) / 255) & 0x1F;
+                uint16_t g6 = ((g * 63 + 127) / 255) & 0x3F;
+                uint16_t b5 = ((b * 31 + 127) / 255) & 0x1F;
+                
+                // Combine into RGB565
+                uint16_t rgb565 = (r5 << 11) | (g6 << 5) | b5;
+                
+                // Set pixel in buffer
+                image_buffer_[y * LCD_1IN69_WIDTH + x] = rgb565;
+            }
+        }
+        
+        // Display the buffer
+        LCD_1IN69_Display(image_buffer_);
+    }
+    
+    rclcpp::Subscription<sensor_msgs::msg::Image>::SharedPtr subscription_;
+    UWORD *image_buffer_;
+};
+
+int main(int argc, char * argv[])
+{
+    rclcpp::init(argc, argv);
+    
+    auto node = std::make_shared<ImageDisplayNode>();
+    
+    if (rclcpp::ok()) {
+        rclcpp::spin(node);
+    }
+    
+    rclcpp::shutdown();
+    return 0;
+}
+

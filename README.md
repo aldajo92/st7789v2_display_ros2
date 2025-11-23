@@ -34,7 +34,9 @@ source install/setup.bash
 
 ## Usage
 
-### Running the Node (must run as root for GPIO/SPI access)
+### Text Display Node
+
+Displays text messages on the LCD.
 
 Using the launch file (recommended):
 
@@ -46,6 +48,22 @@ Or directly:
 
 ```bash
 sudo -E bash -c "source /ros2_ws/install/setup.bash && ros2 run st7789v2_display display_node"
+```
+
+### Image Display Node
+
+Displays camera images on the LCD (subscribes to `/camera/image_raw`).
+
+Using the launch file (recommended):
+
+```bash
+sudo -E bash -c "source /ros2_ws/install/setup.bash && ros2 launch st7789v2_display image_display.launch.py"
+```
+
+Or directly:
+
+```bash
+sudo -E bash -c "source /ros2_ws/install/setup.bash && ros2 run st7789v2_display image_display_node"
 ```
 
 ### Publishing Text to Display
@@ -71,12 +89,19 @@ ros2 topic pub --once /st7789v2_display/text std_msgs/msg/String "data: 'Line 1\
 
 ## Topics
 
-### Subscribed Topics
+### Text Display Node
 
+**Subscribed Topics:**
 - `/st7789v2_display/text` (`std_msgs/msg/String`): Text to display on the screen
+
+### Image Display Node
+
+**Subscribed Topics:**
+- `/camera/image_raw` (`sensor_msgs/msg/Image`): Camera images to display on the screen
 
 ## Features
 
+### Text Display Node Features
 - **Automatic text wrapping**: Text automatically wraps to the next line when reaching the edge
 - **Multi-line support**: Use `\n` for explicit line breaks
 - **Professional fonts**: Uses Waveshare font library (Font12, Font16, Font20, Font24)
@@ -84,10 +109,20 @@ ros2 topic pub --once /st7789v2_display/text std_msgs/msg/String "data: 'Line 1\
 - **Bordered layout**: Blue border around the display area
 - **Status indicator**: Shows "Updated!" when new messages arrive
 
+### Image Display Node Features
+- **Real-time camera display**: Shows live camera feed on the LCD
+- **Automatic scaling**: Images are automatically resized to fit the 240x280 display
+- **RGB565 conversion**: Converts camera images to the display's native color format
+- **High performance**: Optimized for smooth video display
+- **Any image source**: Works with any ROS2 image publisher
+
 ## Dependencies
 
 - rclcpp
 - std_msgs
+- sensor_msgs
+- cv_bridge
+- OpenCV
 - bcm2835 library (included in the package)
 - Waveshare LCD library (included in the package)
 
@@ -131,10 +166,13 @@ st7789v2_display/
 ├── package.xml
 ├── README.md
 ├── launch/
-│   └── display.launch.py
+│   ├── display.launch.py           (Text display node)
+│   └── image_display.launch.py     (Image display node)
 └── src/
-    ├── display_node_waveshare.cpp  (Main ROS2 node)
-    └── waveshare/                   (Waveshare LCD library)
+    ├── display_node_waveshare.cpp  (Text display ROS2 node)
+    ├── image_display_node.cpp      (Image display ROS2 node)
+    ├── bcm2835.c/h                 (SPI/GPIO library)
+    └── waveshare/                  (Waveshare LCD library)
         ├── DEV_Config.c/h          (Hardware abstraction)
         ├── LCD_1in69.c/h           (1.69" display driver)
         ├── GUI_Paint.c/h           (Graphics library)

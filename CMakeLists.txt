@@ -10,6 +10,8 @@ find_package(ament_cmake REQUIRED)
 find_package(rclcpp REQUIRED)
 find_package(std_msgs REQUIRED)
 find_package(sensor_msgs REQUIRED)
+find_package(cv_bridge REQUIRED)
+find_package(OpenCV REQUIRED)
 
 # Include directories
 include_directories(include)
@@ -60,8 +62,30 @@ ament_target_dependencies(display_node
 )
 target_link_libraries(display_node waveshare_lcd bcm2835)
 
+# Build image display node executable
+add_executable(image_display_node
+  src/image_display_node.cpp
+)
+target_include_directories(image_display_node PUBLIC
+  $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/src>
+  $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
+  ${OpenCV_INCLUDE_DIRS}
+)
+ament_target_dependencies(image_display_node
+  rclcpp
+  sensor_msgs
+  cv_bridge
+)
+target_link_libraries(image_display_node 
+  waveshare_lcd 
+  bcm2835
+  ${OpenCV_LIBS}
+)
+
 # Install targets
-install(TARGETS display_node
+install(TARGETS 
+  display_node
+  image_display_node
   DESTINATION lib/${PROJECT_NAME}
 )
 
