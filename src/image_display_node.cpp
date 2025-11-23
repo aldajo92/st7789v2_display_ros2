@@ -18,6 +18,10 @@ public:
     {
         RCLCPP_INFO(this->get_logger(), "Initializing ST7789V2 image display...");
         
+        // Declare parameter for topic name
+        this->declare_parameter<std::string>("image_topic", "/camera/image_raw");
+        image_topic_ = this->get_parameter("image_topic").as_string();
+        
         // Initialize hardware
         if(DEV_ModuleInit() != 0){
             RCLCPP_ERROR(this->get_logger(), "Failed to initialize hardware!");
@@ -52,13 +56,13 @@ public:
         
         RCLCPP_INFO(this->get_logger(), "Display initialized successfully");
         
-        // Create subscription
+        // Create subscription using the parameter
         subscription_ = this->create_subscription<sensor_msgs::msg::Image>(
-            "/camera/image_raw", 
+            image_topic_, 
             10,
             std::bind(&ImageDisplayNode::image_callback, this, std::placeholders::_1));
         
-        RCLCPP_INFO(this->get_logger(), "Subscribed to /camera/image_raw topic");
+        RCLCPP_INFO(this->get_logger(), "Subscribed to %s topic", image_topic_.c_str());
     }
     
     ~ImageDisplayNode()
@@ -160,8 +164,12 @@ private:
         // Initialize Paint library with the buffer
         Paint_NewImage(image_buffer_, LCD_1IN69_WIDTH, LCD_1IN69_HEIGHT, 0, BLACK, 16);
         
-        // Draw topic name at the top
-        Paint_DrawString_EN(5, 5, "/camera/image_raw", &Font16, BLACK, WHITE);
+        // Draw topic name at the top (truncate if too long)
+        std::string display_topic = image_topic_;
+        if (display_topic.length() > 28) {
+            display_topic = display_topic.substr(0, 25) + "...";
+        }
+        Paint_DrawString_EN(5, 5, display_topic.c_str(), &Font16, BLACK, WHITE);
         
         // Display the buffer
         LCD_1IN69_Display(image_buffer_);
@@ -169,6 +177,7 @@ private:
     
     rclcpp::Subscription<sensor_msgs::msg::Image>::SharedPtr subscription_;
     UWORD *image_buffer_;
+    std::string image_topic_;
 };
 
 int main(int argc, char * argv[])
