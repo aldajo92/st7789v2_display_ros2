@@ -67,7 +67,7 @@ public:
         
         if (image_buffer_) {
             Paint_Clear(BLACK);
-            Paint_DrawString_EN(40, 130, "Shutting down...", &Font20, BLACK, RED);
+            Paint_DrawString_EN(10, 130, "Shutting down...", &Font20, BLACK, RED);
             LCD_1IN69_Display(image_buffer_);
             DEV_Delay_ms(1000);
             
@@ -98,9 +98,13 @@ private:
     
     cv::Mat fitImageToDisplay(const cv::Mat& image)
     {
-        // Calculate scaling factor to fit image in display while maintaining aspect ratio
+        // Reserve space for topic name at top (25 pixels for text)
+        const int text_height = 25;
+        const int available_height = LCD_1IN69_HEIGHT - text_height;
+        
+        // Calculate scaling factor to fit image in remaining space while maintaining aspect ratio
         float scale_width = static_cast<float>(LCD_1IN69_WIDTH) / image.cols;
-        float scale_height = static_cast<float>(LCD_1IN69_HEIGHT) / image.rows;
+        float scale_height = static_cast<float>(available_height) / image.rows;
         float scale = std::min(scale_width, scale_height);
         
         // Calculate new size maintaining aspect ratio
@@ -114,11 +118,11 @@ private:
         // Create black canvas of display size
         cv::Mat canvas = cv::Mat::zeros(LCD_1IN69_HEIGHT, LCD_1IN69_WIDTH, image.type());
         
-        // Calculate position to center the image
+        // Calculate position - centered horizontally, below text at top
         int x_offset = (LCD_1IN69_WIDTH - new_width) / 2;
-        int y_offset = (LCD_1IN69_HEIGHT - new_height) / 2;
+        int y_offset = text_height;  // Start after text area
         
-        // Copy resized image to center of canvas
+        // Copy resized image to canvas below text area
         resized.copyTo(canvas(cv::Rect(x_offset, y_offset, new_width, new_height)));
         
         return canvas;
@@ -152,6 +156,12 @@ private:
                 image_buffer_[y * LCD_1IN69_WIDTH + x] = ((rgb565 & 0xFF) << 8) | ((rgb565 >> 8) & 0xFF);
             }
         }
+        
+        // Initialize Paint library with the buffer
+        Paint_NewImage(image_buffer_, LCD_1IN69_WIDTH, LCD_1IN69_HEIGHT, 0, BLACK, 16);
+        
+        // Draw topic name at the top
+        Paint_DrawString_EN(5, 5, "/camera/image_raw", &Font16, BLACK, WHITE);
         
         // Display the buffer
         LCD_1IN69_Display(image_buffer_);
