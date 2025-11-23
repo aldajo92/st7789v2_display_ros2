@@ -1,4 +1,8 @@
 #include <memory>
+#include <mutex>
+#include <thread>
+#include <atomic>
+#include <chrono>
 #include <rclcpp/rclcpp.hpp>
 #include <sensor_msgs/msg/image.hpp>
 #include <cv_bridge/cv_bridge.h>
@@ -71,11 +75,23 @@ public:
         
         RCLCPP_INFO(this->get_logger(), "Subscribed to %s and %s topics", 
                     image_topic_.c_str(), processed_topic_.c_str());
+        
+        // Start rendering thread
+        running_ = true;
+        render_thread_ = std::thread(&ImageDisplayNode::renderLoop, this);
+        
+        RCLCPP_INFO(this->get_logger(), "Rendering thread started at 20 FPS");
     }
     
     ~ImageDisplayNode()
     {
         RCLCPP_INFO(this->get_logger(), "Shutting down image display node...");
+        
+        // Stop rendering thread
+        running_ = false;
+        if (render_thread_.joinable()) {
+            render_thread_.join();
+        }
         
         if (image_buffer_) {
             Paint_Clear(BLACK);
@@ -95,9 +111,15 @@ private:
     {
         try {
             cv_bridge::CvImagePtr cv_ptr = cv_bridge::toCvCopy(msg, sensor_msgs::image_encodings::BGR8);
-            raw_image_ = cv_ptr->image.clone();
+            
+            // Preprocess: resize image here in callback (async processing)
+            const int available_height = (LCD_1IN69_HEIGHT - 40 - 18) / 2;  // Split space
+            cv::Mat resized = resizeToFit(cv_ptr->image, LCD_1IN69_WIDTH, available_height);
+            
+            // Store preprocessed image in buffer
+            std::lock_guard<std::mutex> lock(image_mutex_);
+            raw_image_ = resized;
             has_raw_image_ = true;
-            updateDisplay();
         } catch (cv_bridge::Exception& e) {
             RCLCPP_ERROR(this->get_logger(), "cv_bridge exception: %s", e.what());
         }
@@ -107,56 +129,90 @@ private:
     {
         try {
             cv_bridge::CvImagePtr cv_ptr = cv_bridge::toCvCopy(msg, sensor_msgs::image_encodings::BGR8);
-            processed_image_ = cv_ptr->image.clone();
+            
+            // Preprocess: resize image here in callback (async processing)
+            const int available_height = (LCD_1IN69_HEIGHT - 40 - 18) / 2;  // Split space
+            cv::Mat resized = resizeToFit(cv_ptr->image, LCD_1IN69_WIDTH, available_height);
+            
+            // Store preprocessed image in buffer
+            std::lock_guard<std::mutex> lock(image_mutex_);
+            processed_image_ = resized;
             has_processed_image_ = true;
-            updateDisplay();
         } catch (cv_bridge::Exception& e) {
             RCLCPP_ERROR(this->get_logger(), "cv_bridge exception: %s", e.what());
         }
     }
     
-    void updateDisplay()
+    void renderLoop()
     {
-        // Create combined display with both images
-        cv::Mat fitted = fitBothImagesToDisplay();
-        convertAndDisplay(fitted);
+        // Rendering loop running in separate thread
+        const auto frame_duration = std::chrono::milliseconds(50);  // 20 FPS
+        
+        while (running_) {
+            auto start_time = std::chrono::steady_clock::now();
+            
+            // Only update display if we have at least one image
+            if (has_raw_image_ || has_processed_image_) {
+                // Get latest PREPROCESSED images from buffers (already resized!)
+                cv::Mat raw_copy, processed_copy;
+                bool has_raw, has_processed;
+                
+                {
+                    std::lock_guard<std::mutex> lock(image_mutex_);
+                    if (has_raw_image_) {
+                        raw_copy = raw_image_.clone();
+                    }
+                    if (has_processed_image_) {
+                        processed_copy = processed_image_.clone();
+                    }
+                    has_raw = has_raw_image_;
+                    has_processed = has_processed_image_;
+                }
+                
+                // Combine preprocessed images and display (fast!)
+                cv::Mat combined = combineBothImages(raw_copy, processed_copy, has_raw, has_processed);
+                convertAndDisplay(combined);
+            }
+            
+            // Sleep to maintain frame rate
+            auto end_time = std::chrono::steady_clock::now();
+            auto elapsed = end_time - start_time;
+            auto sleep_time = frame_duration - elapsed;
+            
+            if (sleep_time > std::chrono::milliseconds(0)) {
+                std::this_thread::sleep_for(sleep_time);
+            }
+        }
     }
     
-    cv::Mat fitBothImagesToDisplay()
+    cv::Mat combineBothImages(const cv::Mat& raw_img, const cv::Mat& proc_img, 
+                               bool has_raw, bool has_proc)
     {
-        // Layout heights
-        const int username_height = 22;
-        const int topic_height = 18;
-        
-        // Calculate available space for each image
-        const int header_height = username_height + topic_height;
-        const int middle_topic_height = topic_height;
-        const int available_for_images = LCD_1IN69_HEIGHT - header_height - middle_topic_height;
-        const int image_height = available_for_images / 2;  // Split remaining space
+        // Images are already resized in callbacks, just combine them
+        const int header_height = 40;
+        const int middle_topic_height = 18;
+        const int image_height = (LCD_1IN69_HEIGHT - header_height - middle_topic_height) / 2;
         
         // Create black canvas
         cv::Mat canvas = cv::Mat::zeros(LCD_1IN69_HEIGHT, LCD_1IN69_WIDTH, CV_8UC3);
         
         int current_y = header_height;
         
-        // Process and place first image (raw)
-        if (has_raw_image_ && !raw_image_.empty()) {
-            cv::Mat resized = resizeToFit(raw_image_, LCD_1IN69_WIDTH, image_height);
-            int x_offset = (LCD_1IN69_WIDTH - resized.cols) / 2;
-            resized.copyTo(canvas(cv::Rect(x_offset, current_y, resized.cols, resized.rows)));
-            current_y += image_height;
-        } else {
-            current_y += image_height;
+        // Place first image (already resized)
+        if (has_raw && !raw_img.empty()) {
+            int x_offset = (LCD_1IN69_WIDTH - raw_img.cols) / 2;
+            int y_center = current_y + (image_height - raw_img.rows) / 2;
+            raw_img.copyTo(canvas(cv::Rect(x_offset, y_center, raw_img.cols, raw_img.rows)));
         }
         
-        current_y += middle_topic_height;
+        current_y += image_height + middle_topic_height;
         
-        // Process and place second image (processed)
-        if (has_processed_image_ && !processed_image_.empty()) {
-            cv::Mat resized = resizeToFit(processed_image_, LCD_1IN69_WIDTH, image_height);
-            int x_offset = (LCD_1IN69_WIDTH - resized.cols) / 2;
-            if (current_y + resized.rows <= LCD_1IN69_HEIGHT) {
-                resized.copyTo(canvas(cv::Rect(x_offset, current_y, resized.cols, resized.rows)));
+        // Place second image (already resized)
+        if (has_proc && !proc_img.empty()) {
+            int x_offset = (LCD_1IN69_WIDTH - proc_img.cols) / 2;
+            int y_center = current_y + (image_height - proc_img.rows) / 2;
+            if (y_center + proc_img.rows <= LCD_1IN69_HEIGHT) {
+                proc_img.copyTo(canvas(cv::Rect(x_offset, y_center, proc_img.cols, proc_img.rows)));
             }
         }
         
@@ -239,6 +295,13 @@ private:
     UWORD *image_buffer_;
     std::string image_topic_;
     std::string processed_topic_;
+    
+    // Rendering thread
+    std::thread render_thread_;
+    std::atomic<bool> running_;
+    
+    // Image buffers protected by mutex
+    std::mutex image_mutex_;
     cv::Mat raw_image_;
     cv::Mat processed_image_;
     bool has_raw_image_ = false;
