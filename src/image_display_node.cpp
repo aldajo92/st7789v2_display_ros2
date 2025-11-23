@@ -98,25 +98,21 @@ private:
     
     cv::Mat fitImageToDisplay(const cv::Mat& image)
     {
-        // Apply slight Gaussian blur to reduce noise before downsampling
-        cv::Mat blurred;
-        cv::GaussianBlur(image, blurred, cv::Size(3, 3), 0.5);
-        
         // Calculate scaling factor to fit image in display while maintaining aspect ratio
-        float scale_width = static_cast<float>(LCD_1IN69_WIDTH) / blurred.cols;
-        float scale_height = static_cast<float>(LCD_1IN69_HEIGHT) / blurred.rows;
+        float scale_width = static_cast<float>(LCD_1IN69_WIDTH) / image.cols;
+        float scale_height = static_cast<float>(LCD_1IN69_HEIGHT) / image.rows;
         float scale = std::min(scale_width, scale_height);
         
         // Calculate new size maintaining aspect ratio
-        int new_width = static_cast<int>(blurred.cols * scale);
-        int new_height = static_cast<int>(blurred.rows * scale);
+        int new_width = static_cast<int>(image.cols * scale);
+        int new_height = static_cast<int>(image.rows * scale);
         
         // Resize image with high-quality interpolation
         cv::Mat resized;
-        cv::resize(blurred, resized, cv::Size(new_width, new_height), 0, 0, cv::INTER_AREA);
+        cv::resize(image, resized, cv::Size(new_width, new_height), 0, 0, cv::INTER_LINEAR);
         
         // Create black canvas of display size
-        cv::Mat canvas = cv::Mat::zeros(LCD_1IN69_HEIGHT, LCD_1IN69_WIDTH, blurred.type());
+        cv::Mat canvas = cv::Mat::zeros(LCD_1IN69_HEIGHT, LCD_1IN69_WIDTH, image.type());
         
         // Calculate position to center the image
         int x_offset = (LCD_1IN69_WIDTH - new_width) / 2;
@@ -130,33 +126,30 @@ private:
     
     void convertAndDisplay(const cv::Mat& image)
     {
-        // Convert BGR to RGB565 format with dithering to reduce banding
-        for (int y = 0; y < LCD_1IN69_HEIGHT && y < image.rows; y++) {
-            for (int x = 0; x < LCD_1IN69_WIDTH && x < image.cols; x++) {
+        // First, clear the entire buffer
+        memset(image_buffer_, 0, LCD_1IN69_HEIGHT * LCD_1IN69_WIDTH * 2);
+        
+        // Convert BGR to RGB565 format with proper byte order
+        for (int y = 0; y < image.rows && y < LCD_1IN69_HEIGHT; y++) {
+            for (int x = 0; x < image.cols && x < LCD_1IN69_WIDTH; x++) {
                 cv::Vec3b pixel = image.at<cv::Vec3b>(y, x);
                 
-                // Convert BGR to RGB
-                int r = pixel[2]; // Red (OpenCV is BGR)
-                int g = pixel[1]; // Green
-                int b = pixel[0]; // Blue
+                // OpenCV uses BGR order, extract channels
+                uint8_t b = pixel[0]; // Blue
+                uint8_t g = pixel[1]; // Green  
+                uint8_t r = pixel[2]; // Red
                 
-                // Add dithering noise to reduce banding artifacts
-                // Simple ordered dithering pattern
-                int dither = ((x & 1) ^ (y & 1)) * 2 - 1;
-                r = std::max(0, std::min(255, r + dither));
-                g = std::max(0, std::min(255, g + dither));
-                b = std::max(0, std::min(255, b + dither));
+                // Convert 8-bit BGR to 5-6-5 RGB format
+                // RGB565 format: RRRR RGGG GGGB BBBB (big-endian)
+                uint8_t r5 = (r >> 3) & 0x1F;  // 5 bits for red
+                uint8_t g6 = (g >> 2) & 0x3F;  // 6 bits for green
+                uint8_t b5 = (b >> 3) & 0x1F;  // 5 bits for blue
                 
-                // Convert 8-bit RGB to 5-6-5 format with rounding
-                uint16_t r5 = ((r * 31 + 127) / 255) & 0x1F;
-                uint16_t g6 = ((g * 63 + 127) / 255) & 0x3F;
-                uint16_t b5 = ((b * 31 + 127) / 255) & 0x1F;
-                
-                // Combine into RGB565
+                // Pack into RGB565 - swap bytes for correct display order
                 uint16_t rgb565 = (r5 << 11) | (g6 << 5) | b5;
                 
-                // Set pixel in buffer
-                image_buffer_[y * LCD_1IN69_WIDTH + x] = rgb565;
+                // Swap bytes for proper display (little-endian to big-endian)
+                image_buffer_[y * LCD_1IN69_WIDTH + x] = ((rgb565 & 0xFF) << 8) | ((rgb565 >> 8) & 0xFF);
             }
         }
         
