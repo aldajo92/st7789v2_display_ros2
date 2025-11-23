@@ -11,6 +11,7 @@
 extern "C" {
     #include "waveshare/DEV_Config.h"
     #include "waveshare/LCD_1in69.h"
+    #include "waveshare/LCD_1in69_fast.h"
     #include "waveshare/GUI_Paint.h"
     #include "waveshare/fonts.h"
 }
@@ -252,10 +253,10 @@ private:
     
     void convertAndDisplay(const cv::Mat& image)
     {
-        // Optimized RGB565 conversion with pre-allocated buffer
+        // Optimized RGB565 conversion with batch SPI transfer
         const int total_pixels = LCD_1IN69_WIDTH * LCD_1IN69_HEIGHT;
         
-        // Fast conversion loop - unrolled pixel access
+        // Fast conversion loop - optimized pixel access
         int idx = 0;
         for (int y = 0; y < image.rows && y < LCD_1IN69_HEIGHT; y++) {
             const cv::Vec3b* row_ptr = image.ptr<cv::Vec3b>(y);
@@ -263,9 +264,9 @@ private:
                 const cv::Vec3b& pixel = row_ptr[x];
                 
                 // Fast RGB565 conversion with bit operations
-                uint16_t rgb565 = ((pixel[2] & 0xF8) << 8) |   // Red
-                                  ((pixel[1] & 0xFC) << 3) |   // Green
-                                  ((pixel[0] >> 3));           // Blue
+                uint16_t rgb565 = ((pixel[2] & 0xF8) << 8) |   // Red (5 bits)
+                                  ((pixel[1] & 0xFC) << 3) |   // Green (6 bits)
+                                  ((pixel[0] >> 3));           // Blue (5 bits)
                 
                 // Byte swap for display
                 image_buffer_[idx] = ((rgb565 & 0xFF) << 8) | ((rgb565 >> 8) & 0xFF);
@@ -304,8 +305,8 @@ private:
         }
         Paint_DrawString_EN(5, 140, display_topic2.c_str(), &Font12, BLACK, MAGENTA);
         
-        // Display the buffer
-        LCD_1IN69_Display(image_buffer_);
+        // Display the buffer using fast single-transfer method
+        LCD_1IN69_Display_Fast(image_buffer_);
     }
     
     rclcpp::Subscription<sensor_msgs::msg::Image>::SharedPtr subscription_raw_;

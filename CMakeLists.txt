@@ -34,6 +34,7 @@ install(TARGETS bcm2835
 add_library(waveshare_lcd STATIC
   src/waveshare/DEV_Config.c
   src/waveshare/LCD_1in69.c
+  src/waveshare/LCD_1in69_fast.c
   src/waveshare/GUI_Paint.c
   src/waveshare/font8.c
   src/waveshare/font12.c
