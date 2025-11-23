@@ -18,9 +18,11 @@ public:
     {
         RCLCPP_INFO(this->get_logger(), "Initializing ST7789V2 image display...");
         
-        // Declare parameter for topic name
+        // Declare parameters for both topics
         this->declare_parameter<std::string>("image_topic", "/camera/image_raw");
+        this->declare_parameter<std::string>("processed_topic", "/cv/processed_image");
         image_topic_ = this->get_parameter("image_topic").as_string();
+        processed_topic_ = this->get_parameter("processed_topic").as_string();
         
         // Initialize hardware
         if(DEV_ModuleInit() != 0){
@@ -56,13 +58,19 @@ public:
         
         RCLCPP_INFO(this->get_logger(), "Display initialized successfully");
         
-        // Create subscription using the parameter
-        subscription_ = this->create_subscription<sensor_msgs::msg::Image>(
+        // Create subscriptions for both topics using SensorDataQoS for compatibility
+        subscription_raw_ = this->create_subscription<sensor_msgs::msg::Image>(
             image_topic_, 
-            10,
-            std::bind(&ImageDisplayNode::image_callback, this, std::placeholders::_1));
+            rclcpp::SensorDataQoS(),
+            std::bind(&ImageDisplayNode::raw_image_callback, this, std::placeholders::_1));
         
-        RCLCPP_INFO(this->get_logger(), "Subscribed to %s topic", image_topic_.c_str());
+        subscription_processed_ = this->create_subscription<sensor_msgs::msg::Image>(
+            processed_topic_, 
+            rclcpp::SensorDataQoS(),
+            std::bind(&ImageDisplayNode::processed_image_callback, this, std::placeholders::_1));
+        
+        RCLCPP_INFO(this->get_logger(), "Subscribed to %s and %s topics", 
+                    image_topic_.c_str(), processed_topic_.c_str());
     }
     
     ~ImageDisplayNode()
@@ -83,55 +91,91 @@ public:
     }
 
 private:
-    void image_callback(const sensor_msgs::msg::Image::SharedPtr msg)
+    void raw_image_callback(const sensor_msgs::msg::Image::SharedPtr msg)
     {
         try {
-            // Convert ROS image to OpenCV format
             cv_bridge::CvImagePtr cv_ptr = cv_bridge::toCvCopy(msg, sensor_msgs::image_encodings::BGR8);
-            
-            // Calculate aspect ratio and resize to fit display while maintaining ratio
-            cv::Mat fitted = fitImageToDisplay(cv_ptr->image);
-            
-            // Convert to RGB565 and display
-            convertAndDisplay(fitted);
-            
+            raw_image_ = cv_ptr->image.clone();
+            has_raw_image_ = true;
+            updateDisplay();
         } catch (cv_bridge::Exception& e) {
             RCLCPP_ERROR(this->get_logger(), "cv_bridge exception: %s", e.what());
         }
     }
     
-    cv::Mat fitImageToDisplay(const cv::Mat& image)
+    void processed_image_callback(const sensor_msgs::msg::Image::SharedPtr msg)
     {
-        // Reserve space for username and topic name at top
-        const int username_height = 22;  // Space for username
-        const int topic_height = 20;     // Space for topic name
-        const int total_header_height = username_height + topic_height;
-        const int available_height = LCD_1IN69_HEIGHT - total_header_height;
+        try {
+            cv_bridge::CvImagePtr cv_ptr = cv_bridge::toCvCopy(msg, sensor_msgs::image_encodings::BGR8);
+            processed_image_ = cv_ptr->image.clone();
+            has_processed_image_ = true;
+            updateDisplay();
+        } catch (cv_bridge::Exception& e) {
+            RCLCPP_ERROR(this->get_logger(), "cv_bridge exception: %s", e.what());
+        }
+    }
+    
+    void updateDisplay()
+    {
+        // Create combined display with both images
+        cv::Mat fitted = fitBothImagesToDisplay();
+        convertAndDisplay(fitted);
+    }
+    
+    cv::Mat fitBothImagesToDisplay()
+    {
+        // Layout heights
+        const int username_height = 22;
+        const int topic_height = 18;
         
-        // Calculate scaling factor to fit image in remaining space while maintaining aspect ratio
-        float scale_width = static_cast<float>(LCD_1IN69_WIDTH) / image.cols;
-        float scale_height = static_cast<float>(available_height) / image.rows;
+        // Calculate available space for each image
+        const int header_height = username_height + topic_height;
+        const int middle_topic_height = topic_height;
+        const int available_for_images = LCD_1IN69_HEIGHT - header_height - middle_topic_height;
+        const int image_height = available_for_images / 2;  // Split remaining space
+        
+        // Create black canvas
+        cv::Mat canvas = cv::Mat::zeros(LCD_1IN69_HEIGHT, LCD_1IN69_WIDTH, CV_8UC3);
+        
+        int current_y = header_height;
+        
+        // Process and place first image (raw)
+        if (has_raw_image_ && !raw_image_.empty()) {
+            cv::Mat resized = resizeToFit(raw_image_, LCD_1IN69_WIDTH, image_height);
+            int x_offset = (LCD_1IN69_WIDTH - resized.cols) / 2;
+            resized.copyTo(canvas(cv::Rect(x_offset, current_y, resized.cols, resized.rows)));
+            current_y += image_height;
+        } else {
+            current_y += image_height;
+        }
+        
+        current_y += middle_topic_height;
+        
+        // Process and place second image (processed)
+        if (has_processed_image_ && !processed_image_.empty()) {
+            cv::Mat resized = resizeToFit(processed_image_, LCD_1IN69_WIDTH, image_height);
+            int x_offset = (LCD_1IN69_WIDTH - resized.cols) / 2;
+            if (current_y + resized.rows <= LCD_1IN69_HEIGHT) {
+                resized.copyTo(canvas(cv::Rect(x_offset, current_y, resized.cols, resized.rows)));
+            }
+        }
+        
+        return canvas;
+    }
+    
+    cv::Mat resizeToFit(const cv::Mat& image, int max_width, int max_height)
+    {
+        float scale_width = static_cast<float>(max_width) / image.cols;
+        float scale_height = static_cast<float>(max_height) / image.rows;
         float scale = std::min(scale_width, scale_height);
         
-        // Calculate new size maintaining aspect ratio
         int new_width = static_cast<int>(image.cols * scale);
         int new_height = static_cast<int>(image.rows * scale);
         
-        // Resize image with high-quality interpolation
         cv::Mat resized;
         cv::resize(image, resized, cv::Size(new_width, new_height), 0, 0, cv::INTER_LINEAR);
         
-        // Create black canvas of display size
-        cv::Mat canvas = cv::Mat::zeros(LCD_1IN69_HEIGHT, LCD_1IN69_WIDTH, image.type());
-        
-        // Calculate position - centered horizontally, below text headers
-        int x_offset = (LCD_1IN69_WIDTH - new_width) / 2;
-        int y_offset = total_header_height;  // Start after both text areas
-        
-        // Copy resized image to canvas below text area
-        resized.copyTo(canvas(cv::Rect(x_offset, y_offset, new_width, new_height)));
-        
-        return canvas;
+        return resized;
     }
     
     void convertAndDisplay(const cv::Mat& image)
@@ -168,25 +212,37 @@ private:
         
         // Draw username at the very top in yellow, centered horizontally
         const char* username = "@aldajo92";
-        // Calculate actual width: each character in Font20 is 11 pixels wide
         int username_width = strlen(username) * Font20.Width;
         int username_x = (LCD_1IN69_WIDTH - username_width) / 2;
         Paint_DrawString_EN(username_x, 2, username, &Font20, BLACK, YELLOW);
         
-        // Draw topic name below username (truncate if too long)
-        std::string display_topic = image_topic_;
-        if (display_topic.length() > 35) {
-            display_topic = display_topic.substr(0, 32) + "...";
+        // Draw first topic name below username
+        std::string display_topic1 = image_topic_;
+        if (display_topic1.length() > 35) {
+            display_topic1 = display_topic1.substr(0, 32) + "...";
         }
-        Paint_DrawString_EN(5, 24, display_topic.c_str(), &Font12, BLACK, WHITE);
+        Paint_DrawString_EN(5, 24, display_topic1.c_str(), &Font12, BLACK, CYAN);
+        
+        // Draw second topic name in the middle
+        std::string display_topic2 = processed_topic_;
+        if (display_topic2.length() > 35) {
+            display_topic2 = display_topic2.substr(0, 32) + "...";
+        }
+        Paint_DrawString_EN(5, 140, display_topic2.c_str(), &Font12, BLACK, MAGENTA);
         
         // Display the buffer
         LCD_1IN69_Display(image_buffer_);
     }
     
-    rclcpp::Subscription<sensor_msgs::msg::Image>::SharedPtr subscription_;
+    rclcpp::Subscription<sensor_msgs::msg::Image>::SharedPtr subscription_raw_;
+    rclcpp::Subscription<sensor_msgs::msg::Image>::SharedPtr subscription_processed_;
     UWORD *image_buffer_;
     std::string image_topic_;
+    std::string processed_topic_;
+    cv::Mat raw_image_;
+    cv::Mat processed_image_;
+    bool has_raw_image_ = false;
+    bool has_processed_image_ = false;
 };
 
 int main(int argc, char * argv[])
